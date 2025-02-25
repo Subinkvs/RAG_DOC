@@ -65,7 +65,7 @@ def generate_response(query, retrieved_docs):
     except OpenAIError as e:
         return f"Error: {str(e)}"
 
-# API to upload and process a PDF document
+# API to upload and process a PDF document efficently
 @app.route('/upload', methods=['POST'])
 def upload_document():
     global stored_index, stored_chunks, stored_embedder
