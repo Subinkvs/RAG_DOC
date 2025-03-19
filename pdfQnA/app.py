@@ -8,11 +8,14 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from openai.error import OpenAIError
 import os
 from dotenv import load_dotenv
+from flask_cors import CORS
+
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 cache = redis.Redis()
 
 # Retrieve API key
