@@ -10,13 +10,16 @@ import os
 from dotenv import load_dotenv
 from flask_cors import CORS
 
-
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
-# Enable CORS for all routes
-CORS(app)  
+
+# Explicitly allow NestJS app to access this API
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000",  # Adjust if NestJS runs on a different port
+                             "methods": ["GET", "POST", "OPTIONS"],
+                             "allow_headers": ["Content-Type", "Authorization"]}})
+
 cache = redis.Redis()
 
 # Retrieve API key
@@ -69,7 +72,7 @@ def generate_response(query, retrieved_docs):
     except OpenAIError as e:
         return f"Error: {str(e)}"
 
-# API to upload and process a PDF document efficently
+# API to upload and process a PDF document efficiently
 @app.route('/upload', methods=['POST'])
 def upload_document():
     global stored_index, stored_chunks, stored_embedder
@@ -117,5 +120,4 @@ def query_document():
 
 # Run Flask app
 if __name__ == '__main__':
-    app.run(debug=True)
-
+    app.run(debug=True, host="0.0.0.0", port=5000)
