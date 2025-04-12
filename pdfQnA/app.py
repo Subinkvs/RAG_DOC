@@ -72,51 +72,92 @@ def generate_response(query, retrieved_docs):
     except OpenAIError as e:
         return f"Error: {str(e)}"
 
-# API to upload and process a PDF document efficiently
+from flask import Flask, request, jsonify
+from sentence_transformers import SentenceTransformer
+import os
+
 @app.route('/upload', methods=['POST'])
 def upload_document():
     global stored_index, stored_chunks, stored_embedder
 
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part in the request"}), 400
 
-    file = request.files['file']
-    file_path = "uploaded_doc.pdf"
-    file.save(file_path)
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
 
-    chunks = load_and_split_documents(file_path)
-    embeddings = embed_chunks(chunks)
-    index = create_faiss_index(embeddings)
+        file_path = "uploaded_doc.pdf"
+        file.save(file_path)
 
-    stored_index = index
-    stored_chunks = chunks
-    stored_embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        # Process the uploaded file
+        try:
+            chunks = load_and_split_documents(file_path)
+            embeddings = embed_chunks(chunks)
+            index = create_faiss_index(embeddings)
+        except Exception as processing_error:
+            return jsonify({"error": f"Document processing failed: {str(processing_error)}"}), 500
 
-    return jsonify({"message": "Document uploaded and processed successfully"}), 200
+        # Store the processed components
+        stored_index = index
+        stored_chunks = chunks
+        stored_embedder = SentenceTransformer('all-MiniLM-L6-v2')
 
-# API to query the document
+        return jsonify({"message": "Document uploaded and processed successfully"}), 200
+
+    except IOError as io_err:
+        return jsonify({"error": f"I/O error occurred: {str(io_err)}"}), 500
+
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
+    finally:
+        # Optional cleanup: remove temp file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
 @app.route('/query', methods=['POST'])
 def query_document():
     global stored_index, stored_chunks, stored_embedder
 
-    data = request.get_json()
-    query = data.get("query")
+    try:
+        # Ensure valid JSON body
+        if not request.is_json:
+            return jsonify({"error": "Request must be JSON"}), 400
 
-    if not query:
-        return jsonify({"error": "Query is required"}), 400
+        data = request.get_json()
+        query = data.get("query")
 
-    if stored_index is None:
-        return jsonify({"error": "No document uploaded. Please upload a document first."}), 400
+        if not query:
+            return jsonify({"error": "Query is required"}), 400
 
-    cached_response = cache.get(query)
-    if cached_response:
-        return jsonify({"response": cached_response.decode()})
+        if stored_index is None:
+            return jsonify({"error": "No document uploaded. Please upload a document first."}), 400
 
-    retrieved_docs = retrieve_similar_documents(query, stored_index, stored_chunks, stored_embedder)
-    answer = generate_response(query, "\n".join(retrieved_docs))
+        # Check cache
+        cached_response = cache.get(query)
+        if cached_response:
+            try:
+                return jsonify({"response": cached_response.decode()}), 200
+            except Exception as decode_err:
+                return jsonify({"error": f"Cached response decode failed: {str(decode_err)}"}), 500
 
-    cache.set(query, answer)
-    return jsonify({"response": answer})
+        # Run retrieval and generation
+        try:
+            retrieved_docs = retrieve_similar_documents(query, stored_index, stored_chunks, stored_embedder)
+            answer = generate_response(query, "\n".join(retrieved_docs))
+        except Exception as processing_error:
+            return jsonify({"error": f"Failed to process query: {str(processing_error)}"}), 500
+
+        cache.set(query, answer)
+        return jsonify({"response": answer}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
+
 
 # Run Flask app
 if __name__ == '__main__':
