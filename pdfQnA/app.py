@@ -9,6 +9,11 @@ from openai.error import OpenAIError
 import os
 from dotenv import load_dotenv
 from flask_cors import CORS
+import re
+from docx import Document as DocxDocument
+import pandas as pd
+import json
+
 
 # Load environment variables
 load_dotenv()
@@ -32,6 +37,9 @@ openai.api_key = openai_api_key
 stored_index = None
 stored_chunks = None
 stored_embedder = None
+document_metadata = {}
+
+from langchain.docstore.document import Document
 
 # Load and split documents
 def load_and_split_documents(file_path):
@@ -72,11 +80,32 @@ def generate_response(query, retrieved_docs):
     except OpenAIError as e:
         return f"Error: {str(e)}"
 
+# Use OpenAI to extract metadata from document text
+def extract_metadata_with_openai(text):
+    prompt = (
+        "Extract key metadata such as Project Code, Project Name, Originator, Document Type, Discipline, "
+        "Sub Discipline, Document Title, Version/Revision, Location, and Floor Number from the following text:\n\n"
+        f"{text}\n\nReturn the metadata in a JSON format."
+    )
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+            temperature=0.7
+        )
+        metadata_str = response['choices'][0]['message']['content'].strip()
+        return json.loads(metadata_str)  # Convert JSON string to Python dict
+    except OpenAIError as e:
+        return {"error": f"Error extracting metadata: {str(e)}"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Failed to parse metadata JSON: {str(e)}"}
 
 
 @app.route('/upload', methods=['POST'])
 def upload_document():
-    global stored_index, stored_chunks, stored_embedder
+    global stored_index, stored_chunks, stored_embedder, document_metadata
 
     try:
         if 'file' not in request.files:
@@ -94,6 +123,13 @@ def upload_document():
             chunks = load_and_split_documents(file_path)
             embeddings = embed_chunks(chunks)
             index = create_faiss_index(embeddings)
+
+            # Extract text from document chunks for metadata extraction
+            doc_text = "\n".join([chunk.page_content for chunk in chunks])
+
+            # Use OpenAI to extract metadata
+            document_metadata = extract_metadata_with_openai(doc_text)
+
         except Exception as processing_error:
             return jsonify({"error": f"Document processing failed: {str(processing_error)}"}), 500
 
@@ -115,47 +151,58 @@ def upload_document():
         if os.path.exists(file_path):
             os.remove(file_path)
 
+@app.route('/metadata', methods=['GET'])
+def get_metadata():
+    # Return captured metadata
+    if not document_metadata:
+        return jsonify({"error": "No document metadata available. Please upload a document first."}), 400
 
-@app.route('/query', methods=['POST'])
-def query_document():
-    global stored_index, stored_chunks, stored_embedder
+    return jsonify({"metadata": document_metadata}), 200
+
+@app.route('/metadata/edit', methods=['POST'])
+def edit_metadata():
+    global document_metadata
 
     try:
-        # Ensure valid JSON body
         if not request.is_json:
             return jsonify({"error": "Request must be JSON"}), 400
 
         data = request.get_json()
-        query = data.get("query")
+        # Allow users to edit metadata
+        for key in data:
+            if key in document_metadata:
+                document_metadata[key] = data[key]
 
-        if not query:
-            return jsonify({"error": "Query is required"}), 400
-
-        if stored_index is None:
-            return jsonify({"error": "No document uploaded. Please upload a document first."}), 400
-
-        # Check cache
-        cached_response = cache.get(query)
-        if cached_response:
-            try:
-                return jsonify({"response": cached_response.decode()}), 200
-            except Exception as decode_err:
-                return jsonify({"error": f"Cached response decode failed: {str(decode_err)}"}), 500
-
-        # Run retrieval and generation
-        try:
-            retrieved_docs = retrieve_similar_documents(query, stored_index, stored_chunks, stored_embedder)
-            answer = generate_response(query, "\n".join(retrieved_docs))
-        except Exception as processing_error:
-            return jsonify({"error": f"Failed to process query: {str(processing_error)}"}), 500
-
-        cache.set(query, answer)
-        return jsonify({"response": answer}), 200
+        return jsonify({"message": "Metadata updated successfully", "updated_metadata": document_metadata}), 200
 
     except Exception as e:
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
+@app.route('/query', methods=['POST'])
+def query_document():
+    try:
+        if not request.is_json:
+            return jsonify({"error": "Request must be JSON"}), 400
 
+        data = request.get_json()
+        query = data.get("query", "")
+
+        if not query:
+            return jsonify({"error": "Query parameter is required"}), 400
+
+        if stored_index is None or stored_chunks is None:
+            return jsonify({"error": "No documents have been uploaded. Please upload a document first."}), 400
+
+        # Retrieve top k similar documents
+        retrieved_docs = retrieve_similar_documents(query, stored_index, stored_chunks, stored_embedder, k=5)
+
+        # Generate a response using OpenAI
+        response = generate_response(query, "\n".join(retrieved_docs))
+
+        return jsonify({"response": response}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 # Run Flask app
 if __name__ == '__main__':
