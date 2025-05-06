@@ -1,3 +1,5 @@
+# Full updated code with document-specific querying using document_id
+
 from flask import Flask, request, jsonify
 import faiss
 import openai
@@ -9,6 +11,7 @@ from openai.error import OpenAIError
 import os
 import json
 import uuid
+import pickle
 from dotenv import load_dotenv
 from flask_cors import CORS
 
@@ -25,11 +28,6 @@ cache = redis.Redis()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 if not openai.api_key:
     raise ValueError("Missing OPENAI_API_KEY in .env")
-
-# Global variables for document processing (indexing, querying)
-stored_index = None
-stored_chunks = None
-stored_embedder = None
 
 # Load and split PDF document
 def load_and_split_documents(file_path):
@@ -94,8 +92,6 @@ def extract_metadata_with_openai(text):
 # Upload document and extract metadata
 @app.route('/upload', methods=['POST'])
 def upload_document():
-    global stored_index, stored_chunks, stored_embedder
-
     try:
         if 'file' not in request.files:
             return jsonify({"error": "No file part in request"}), 400
@@ -115,11 +111,9 @@ def upload_document():
         metadata = extract_metadata_with_openai(doc_text)
 
         document_id = str(uuid.uuid4())
-        cache.setex(f"metadata:{document_id}", 86400, json.dumps(metadata))  # Expires in 24 hours
-
-        stored_index = index
-        stored_chunks = chunks
-        stored_embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        cache.setex(f"metadata:{document_id}", 86400, json.dumps(metadata))
+        cache.set(f"index:{document_id}", pickle.dumps(index))
+        cache.set(f"chunks:{document_id}", pickle.dumps(chunks))
 
         return jsonify({"message": "Document uploaded successfully", "document_id": document_id}), 200
 
@@ -175,7 +169,7 @@ def edit_metadata():
     except Exception as e:
         return jsonify({"error": f"Edit failed: {str(e)}"}), 500
 
-# Query document for answers
+# Query document for answers (now supports document_id)
 @app.route('/query', methods=['POST'])
 def query_document():
     try:
@@ -184,14 +178,21 @@ def query_document():
 
         data = request.get_json()
         query = data.get('query')
+        document_id = data.get('document_id')
 
-        if not query:
-            return jsonify({"error": "Query text required"}), 400
+        if not query or not document_id:
+            return jsonify({"error": "Both 'query' and 'document_id' are required"}), 400
 
-        if stored_index is None or stored_chunks is None:
-            return jsonify({"error": "No document uploaded yet"}), 400
+        index_data = cache.get(f"index:{document_id}")
+        chunks_data = cache.get(f"chunks:{document_id}")
+        if index_data is None or chunks_data is None:
+            return jsonify({"error": "Document data not found for this document_id"}), 404
 
-        retrieved_docs = retrieve_similar_documents(query, stored_index, stored_chunks, stored_embedder, k=5)
+        index = pickle.loads(index_data)
+        chunks = pickle.loads(chunks_data)
+        embedder = SentenceTransformer('all-MiniLM-L6-v2')
+
+        retrieved_docs = retrieve_similar_documents(query, index, chunks, embedder, k=5)
         response = generate_response(query, "\n".join(retrieved_docs))
 
         return jsonify({"response": response}), 200
@@ -199,7 +200,7 @@ def query_document():
     except Exception as e:
         return jsonify({"error": f"Query failed: {str(e)}"}), 500
 
-# # --- Run Server ---
-# if __name__ == "__main__":
-#     app.run(debug=True)
+# --- Run Server ---
+if __name__ == "__main__":
+    app.run(debug=True)
 
